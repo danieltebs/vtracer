@@ -1,0 +1,41 @@
+name: Build portable OCR-enhanced VTracer (Linux)
+
+on:
+  push:
+    branches:
+      - feature/ocr-install-bundle
+    paths:
+      - '.github/workflows/build-ocr-bundle.yml'
+      - 'crates/vtracer/**'
+      - 'crates/vtracer-cli/**'
+      - 'tools/ocr/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+jobs:
+  linux-bundle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile enhanced VTracer
+        run: cargo build --locked --release -p vtracer-cli
+      - name: Verify editable text CLI option
+        run: target/release/vtracer --help | grep -- '--text-file'
+      - name: Package OCR scripts and binary
+        run: |
+          mkdir -p dist/vtracer-ocr/tools/ocr
+          cp target/release/vtracer dist/vtracer-ocr/vtracer
+          cp tools/ocr/prepare_text_layer.py tools/ocr/image_processing.py dist/vtracer-ocr/tools/ocr/
+          cp tools/ocr/README.md dist/vtracer-ocr/OCR_README.md
+          cp LICENSE dist/vtracer-ocr/LICENSE
+          printf '%s\n' "$GITHUB_SHA" > dist/vtracer-ocr/BUILD_SHA
+          chmod +x dist/vtracer-ocr/vtracer
+          sha256sum dist/vtracer-ocr/vtracer > dist/vtracer-ocr/SHA256SUMS
+      - name: Upload portable binary for future offline sessions
+        uses: actions/upload-artifact@v4
+        with:
+          name: vtracer-ocr-linux-x86_64
+          path: dist/vtracer-ocr/
+          if-no-files-found: error
+          retention-days: 90
