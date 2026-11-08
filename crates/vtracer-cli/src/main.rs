@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use visioncortex::{Color, ColorImage};
-use vtracer::{Clustering, Config, FitMode, Hierarchical, Preset};
+use vtracer::{Clustering, Config, EditableText, FitMode, Hierarchical, Preset};
 
 /// Convert an image into vector graphics.
 #[derive(Parser, Debug)]
@@ -123,6 +123,10 @@ struct Args {
     /// Watershed clustering: hierarchy cut level (default 128; higher = more regions, uncapped).
     #[arg(long, value_parser = clap::value_parser!(u32))]
     watershed_detail: Option<u32>,
+
+    /// Optional tab-separated, UTF-8 text layer. Raster lettering must be removed from the source first.
+    #[arg(long, value_name = "LABELS.TSV")]
+    text_file: Option<PathBuf>,
 }
 
 fn parse_simplify_tolerance(s: &str) -> Result<f64, String> {
@@ -241,6 +245,86 @@ fn build_config(args: &Args) -> Result<Config, String> {
     Ok(config)
 }
 
+
+/// Read editable labels without adding dependencies to the no-I/O core.
+/// Format: x<TAB>y<TAB>font_size<TAB>text[<TAB>font_family[<TAB>fill[<TAB>weight[<TAB>text_length]]]]
+/// A literal \n inside the text column represents an SVG multiline label.
+fn parse_text_line(line: &str, line_number: usize) -> Result<EditableText, String> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    if !(4..=8).contains(&fields.len()) {
+        return Err(format!(
+            "line {line_number}: expected 4–8 TAB-separated columns, got {}",
+            fields.len()
+        ));
+    }
+    let number = |col: usize, name: &str| -> Result<f64, String> {
+        fields[col].parse::<f64>().map_err(|_| {
+            format!("line {line_number}: invalid {name}: {}", fields[col])
+        })
+    };
+    if fields[3].is_empty() {
+        return Err(format!("line {line_number}: text cannot be empty"));
+    }
+    let mut label = EditableText::new(
+        fields[3].replace("\\n", "\n"),
+        number(0, "x")?,
+        number(1, "y")?,
+    );
+    label.font_size = number(2, "font_size")?;
+    if let Some(family) = fields.get(4).filter(|s| !s.is_empty()) {
+        label.font_family = (*family).to_owned();
+    }
+    if let Some(fill) = fields.get(5).filter(|s| !s.is_empty()) {
+        label.fill = (*fill).to_owned();
+    }
+    if let Some(weight) = fields.get(6).filter(|s| !s.is_empty()) {
+        label.font_weight = Some(weight.parse::<u16>().map_err(|_| {
+            format!("line {line_number}: invalid font_weight: {weight}")
+        })?);
+    }
+    if let Some(length) = fields.get(7).filter(|s| !s.is_empty()) {
+        label.text_length = Some(length.parse::<f64>().map_err(|_| {
+            format!("line {line_number}: invalid text_length: {length}")
+        })?);
+    }
+    Ok(label)
+}
+
+fn read_text_file(path: &std::path::Path) -> Result<Vec<EditableText>, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read text layer {}: {e}", path.display()))?;
+    contents
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+        .map(|(i, line)| parse_text_line(line, i + 1))
+        .collect()
+}
+
+#[cfg(test)]
+mod editable_text_tests {
+    use super::*;
+
+    #[test]
+    fn parses_unicode_with_comic_font() {
+        let row = "20\t35\t16\tÄpfel & Birnen\tComic Sans MS, Comic Neue, cursive\t#112233\t600\t150";
+        let label = parse_text_line(row, 1).unwrap();
+        assert_eq!(label.text, "Äpfel & Birnen");
+        assert_eq!(label.font_family, "Comic Sans MS, Comic Neue, cursive");
+        assert_eq!(label.font_weight, Some(600));
+        assert_eq!(label.text_length, Some(150.0));
+    }
+
+    #[test]
+    fn parses_multiline_and_defaults() {
+        let label = parse_text_line("1\t2\t18\tErste\\nZweite", 1).unwrap();
+        assert_eq!(label.text, "Erste\nZweite");
+        assert_eq!(label.font_family, "sans-serif");
+        assert!(parse_text_line("bad\t2\t18\tText", 3).is_err());
+        assert!(parse_text_line("1\t2\t18", 3).is_err());
+    }
+}
+
 fn read_image(path: &std::path::Path) -> Result<ColorImage, String> {
     let img = image::open(path)
         .map_err(|_| "no image file found at specified input path".to_string())?
@@ -272,7 +356,13 @@ fn run() -> Result<(), String> {
     let config = build_config(&args)?;
     let pipeline = config.build().map_err(|e| e.to_string())?;
     let img = read_image(input)?;
-    let svg = pipeline.to_svg(&img).map_err(|e| e.to_string())?;
+    let svg = if let Some(text_file) = args.text_file.as_ref() {
+        let labels = read_text_file(text_file)?;
+        pipeline.to_svg_with_text(&img, &labels)
+    } else {
+        pipeline.to_svg(&img)
+    }
+    .map_err(|e| e.to_string())?;
     std::fs::write(output, svg).map_err(|e| format!("cannot write output file: {e}"))?;
     Ok(())
 }
