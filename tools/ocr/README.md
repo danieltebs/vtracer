@@ -9,14 +9,17 @@ The processing chain is:
 
 1. **OCR:** Tesseract finds text, bounding boxes and confidence scores.
 2. **Review outputs:** The script exports a TSV label list and a detailed JSON report.
-3. **Optional background preparation:** OpenCV inpaints high-confidence word
-   rectangles in a **copy** of the image and saves a separate PNG of the mask.
+3. **Optional background preparation:** OpenCV can segment likely **glyph pixels**
+   (rather than erase every pixel in a word rectangle), using a locally fitted
+   background color/gradient and conservative connected-component filtering.
+   It creates a cleaned **copy**, a mask, and a red review overlay.
 4. **SVG composition:** The existing VTracer CLI `--text-file` feature can
    combine the cleaned illustration with actual editable SVG `<text>` objects.
 
 **This is an assisted workflow, not a fully accurate automatic converter.**
 Tesseract can misread German words, drawings can be mistaken for text, and
-rectangular inpainting may remove lines or damage nearby illustrations.
+even conservative glyph masks may leave letters or damage an illustration
+that overlaps the text. Choose a text-free source for best results.
 A high OCR confidence is **not** proof of correctness. Verify every label,
 position, color and masked region before accepting the SVG.
 
@@ -26,7 +29,8 @@ position, color and masked region before accepting the SVG.
 - A system installation of [Tesseract OCR](https://github.com/tesseract-ocr/tesseract)
   with the `deu` (German) and/or `eng` (English) language data.
 - `opencv-python-headless` and its NumPy dependency for background inpainting.
-  If only `--no-inpaint` is used, OpenCV is not needed.
+  If only `--no-inpaint` with the default `--ocr-preprocess original`
+  is used, OpenCV is not needed.
 - VTracer with the optional `--text-file` enhancement from the
   `feature/editable-svg-text` branch (currently a development feature, **not**
   included in the standard released VTracer version).
@@ -42,7 +46,13 @@ python -m pip install opencv-python-headless
 
 ```sh
 python tools/ocr/prepare_text_layer.py input.png --lang deu+eng \
-  --confidence 75 --padding 2
+  --confidence 75 --padding 2 --mask-mode glyph
+
+# For low-contrast text on colorful backgrounds: run OCR on a temporary
+# upscaled, contrast-enhanced grayscale image, returning coordinates in the
+# *original* image's pixel system:
+python tools/ocr/prepare_text_layer.py input.png --lang deu+eng \
+  --ocr-preprocess enhanced --mask-mode glyph --confidence 75
 
 # Review and manually correct input.labels.tsv, input.ocr.json and
 # input.cleaned.mask.png. Inspect input.cleaned.png before tracing.
@@ -55,8 +65,35 @@ The script writes files next to the original:
 | --- | --- |
 | `input.labels.tsv` | Editable text rows for VTracer's `--text-file`. |
 | `input.ocr.json` | Text, confidence, individual word rectangles, warnings and skipped words. |
-| `input.cleaned.png` | Copy of the input with recognized text rectangles inpainted. |
-| `input.cleaned.mask.png` | Review image showing which pixels were masked. |
+| `input.cleaned.png` | Copy of the input with selected text pixels inpainted. |
+| `input.cleaned.mask.png` | Exact binary mask of removed pixels. |
+| `input.cleaned.review.png` | Original illustration with removed pixels highlighted in translucent red. |
+
+### Choosing a mask mode
+
+- `--mask-mode glyph` (**default**) removes only likely letter strokes inside
+  recognized word boxes. It estimates the local background from surrounding
+  pixels, including smooth color gradients, and tries to preserve long colored
+  illustration lines that cross word boxes. This is a **conservative** mode:
+  some letter pixels may remain and must be removed manually or by further
+  processing. OCR misses will never be removed.
+- `--mask-mode box` is the original rectangular algorithm. It removes more
+  pixels, but can erase connectors, colored textures or illustrations that
+  happen to cross a recognized word box.
+- `--mask-contrast 24` sets the minimum color difference from the estimated
+  local background for candidate letter pixels (5–120). Decreasing it makes
+  masking more aggressive and may harm illustrations.
+- `--ocr-preprocess original` (**default**) runs OCR on the source as before.
+  `--ocr-preprocess enhanced` runs Tesseract on a **temporary 2× enlarged,
+  CLAHE contrast-enhanced grayscale image**. CLAHE adjusts local contrast;
+  its OCR box coordinates are scaled back to original pixels before exporting.
+  Enhanced OCR can sometimes improve faint text but can also create false
+  positives. It does not change the original.
+
+The JSON report now records the mode, the number of masked pixels, the
+comparable full-rectangle area, the number of word boxes with no safe glyph
+mask, and the paths to both mask and red review image. Reducing the mask size
+is not by itself proof of perfect artwork preservation or text removal.
 
 **Important:** Each TSV row's `y` is estimated from the bottom of an OCR text
 box, not from an exact typographic baseline. Default font family is
@@ -91,7 +128,8 @@ python -m unittest discover -s tools/ocr/tests -v
 ```
 
 Tests cover TSV grouping, confidence filtering, non-destructive file handling,
-and a small real Tesseract/OpenCV image test. The OCR-specific GitHub Actions
+colored backgrounds, an illustration line crossing a word rectangle,
+RGBA transparency, coordinate scaling, and real Tesseract/OpenCV image tests. The OCR-specific GitHub Actions
 workflow also installs the needed optional dependencies and runs these tests.
 
 ## Design boundaries
@@ -99,6 +137,8 @@ workflow also installs the needed optional dependencies and runs these tests.
 - The **core tracing engine** has no Tesseract, OpenCV, Python or OCR dependency.
 - The companion script is intentionally separate, so maintainers can decide
   independently whether to include or distribute it.
-- Future improvements could use pixel-accurate glyph segmentation rather than
-  full word rectangles, add OCR alternatives, or offer human-in-the-loop
-  correction via a GUI. These are not part of this prototype.
+- The mask uses local contrast and connected components, not trained semantic
+  segmentation. It cannot identify an illustration that looks like a character
+  inside a word box or reliably protect every connector line. Improvements
+  could add learned text segmentation, OCR alternatives, or a GUI for manual
+  correction.
