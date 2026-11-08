@@ -245,3 +245,11 @@ VTracer has since been cited by a few academic papers in computer graphics / vis
 + arXiv 2023 [StarVector: Generating Scalable Vector Graphics Code from Images](https://arxiv.org/abs/2312.11556)
 + arXiv 2024 [Text-Based Reasoning About Vector Graphics](https://arxiv.org/abs/2404.06479)
 + arXiv 2024 [Delving into LLMs' visual understanding ability using SVG to bridge image and text](https://openreview.net/pdf?id=pwlm6Po61I)
+
+### Editable SVG labels (experimental)
+
+For diagrams with existing lettering removed from the input image, the Rust
+API and CLI can add real, editable SVG `<text>` elements to the traced paths.
+Use `--text-file labels.tsv` or `Pipeline::to_svg_with_text`.
+See [editable text overlay documentation](docs/editable-svg-text.md).
+Automatic text recognition (OCR) and text removal are not included.
