@@ -19,6 +19,9 @@ import math
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+
+from image_processing import build_text_mask, enhanced_ocr_image, rescale_ocr_tsv
 
 
 def parse_tesseract_tsv(tsv: str, min_confidence: float = 65.0) -> tuple[list[dict], list[dict]]:
@@ -96,8 +99,9 @@ def run_tesseract(path: Path, lang: str, psm: int, executable: str) -> str:
     return result.stdout
 
 
-def inpaint_image(source: Path, destination: Path, lines: list[dict], padding: int) -> dict:
-    """Inpaint OCR word rectangles with OpenCV; save mask for visual inspection."""
+def inpaint_image(source: Path, destination: Path, lines: list[dict], padding: int,
+                  mode: str = "glyph", contrast: int = 24) -> dict:
+    """Inpaint conservative glyph masks (or legacy rectangles) in a COPY."""
     try:
         import cv2
         import numpy as np
@@ -117,14 +121,7 @@ def inpaint_image(source: Path, destination: Path, lines: list[dict], padding: i
     else:
         raise RuntimeError("Only gray, RGB, and RGBA images are supported")
     height, width = rgb.shape[:2]
-    mask = np.zeros((height, width), dtype=np.uint8)
-    for line in lines:
-        for word in line["words"]:
-            x0 = max(0, word["x"] - padding)
-            y0 = max(0, word["y"] - padding)
-            x1 = min(width, word["x"] + word["width"] + padding)
-            y1 = min(height, word["y"] + word["height"] + padding)
-            mask[y0:y1, x0:x1] = 255
+    mask, audit = build_text_mask(rgb, lines, padding, mode=mode, contrast=contrast)
     cleaned = cv2.inpaint(rgb, mask, 3, cv2.INPAINT_TELEA) if mask.any() else rgb
     if alpha is not None:
         cleaned = cv2.merge((*cv2.split(cleaned), alpha))
@@ -133,7 +130,19 @@ def inpaint_image(source: Path, destination: Path, lines: list[dict], padding: i
     mask_path = destination.with_name(destination.stem + ".mask.png")
     if not cv2.imwrite(str(mask_path), mask):
         raise RuntimeError(f"Cannot write OCR mask to {mask_path}")
-    return {"image_width": width, "image_height": height, "mask_path": str(mask_path), "masked_pixels": int(np.count_nonzero(mask))}
+    # A translucent red overlay reveals exactly what would be removed while
+    # leaving every unmasked pixel identical to the original image.
+    review_path = destination.with_name(destination.stem + ".review.png")
+    review = rgb.copy()
+    if mask.any():
+        red = rgb.copy()
+        red[:, :] = (20, 20, 255)  # BGR
+        blended = cv2.addWeighted(rgb, 0.55, red, 0.45, 0)
+        review[mask != 0] = blended[mask != 0]
+    if not cv2.imwrite(str(review_path), review):
+        raise RuntimeError(f"Cannot write OCR review image to {review_path}")
+    return {"image_width": width, "image_height": height,
+            "mask_path": str(mask_path), "review_path": str(review_path), **audit}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -143,7 +152,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--psm", type=int, choices=range(3, 14), default=11,
                         metavar="3..13", help="Tesseract page segmentation mode (default: sparse text)")
     parser.add_argument("--confidence", type=float, default=65.0, help="Minimum word confidence, 0..100")
-    parser.add_argument("--padding", type=int, default=2, help="Pixels around OCR word boxes to inpaint")
+    parser.add_argument("--padding", type=int, default=2, help="Pixels around recognized glyphs / word boxes")
+    parser.add_argument("--mask-mode", choices=("glyph", "box"), default="glyph",
+                        help="Conservative glyph segmentation (default) or legacy full rectangles")
+    parser.add_argument("--mask-contrast", type=int, default=24,
+                        help="Minimum 8-bit per-channel difference from local background (5..120)")
+    parser.add_argument("--ocr-preprocess", choices=("original", "enhanced"), default="original",
+                        help="Use original image or temporary 2x grayscale CLAHE for low-contrast text")
     parser.add_argument("--font-family", default="Comic Sans MS, Comic Neue, cursive")
     parser.add_argument("--fill", default="#202020")
     parser.add_argument("--tesseract", default="tesseract", help="Tesseract executable")
@@ -157,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--confidence must be between 0 and 100")
     if not 0 <= args.padding <= 20:
         parser.error("--padding must be between 0 and 20")
+    if not 5 <= args.mask_contrast <= 120:
+        parser.error("--mask-contrast must be between 5 and 120")
     if any("\t" in v or "\n" in v or "\r" in v for v in (args.font_family, args.fill)):
         parser.error("Font family and fill must not contain tabs or newlines")
     if not args.input.is_file():
@@ -165,20 +182,32 @@ def main(argv: list[str] | None = None) -> int:
     clean = args.clean_image or stem.with_name(stem.name + ".cleaned.png")
     labels = args.labels or stem.with_name(stem.name + ".labels.tsv")
     report = args.report or stem.with_name(stem.name + ".ocr.json")
-    destinations = [labels, report] + ([] if args.no_inpaint else [clean, clean.with_name(clean.stem + ".mask.png")])
+    destinations = [labels, report] + ([] if args.no_inpaint else [
+        clean, clean.with_name(clean.stem + ".mask.png"),
+        clean.with_name(clean.stem + ".review.png")])
     if any(d.resolve() == args.input.resolve() for d in destinations) or len({d.resolve() for d in destinations}) != len(destinations):
         parser.error("Output paths must be distinct and must not overwrite the source image")
     try:
-        tsv = run_tesseract(args.input, args.lang, args.psm, args.tesseract)
+        if args.ocr_preprocess == "enhanced":
+            with tempfile.TemporaryDirectory(prefix="vtracer_ocr_contrast_") as tmp:
+                prepped = Path(tmp) / "enhanced.png"
+                enhanced_ocr_image(args.input, prepped, scale=2.0)
+                tsv = rescale_ocr_tsv(
+                    run_tesseract(prepped, args.lang, args.psm, args.tesseract), 2.0
+                )
+        else:
+            tsv = run_tesseract(args.input, args.lang, args.psm, args.tesseract)
         lines, skipped = parse_tesseract_tsv(tsv, args.confidence)
         if not lines and not args.allow_empty:
             raise RuntimeError("No confident OCR text found; inspect the source and language pack")
-        stats = None if args.no_inpaint else inpaint_image(args.input, clean, lines, args.padding)
+        stats = None if args.no_inpaint else inpaint_image(args.input, clean, lines, args.padding,
+                                                            mode=args.mask_mode, contrast=args.mask_contrast)
         labels.write_text(labels_tsv(lines, args.font_family, args.fill), encoding="utf-8")
         result = {
             "source": str(args.input), "clean_image": None if args.no_inpaint else str(clean),
             "labels": str(labels), "language": args.lang, "psm": args.psm,
             "min_confidence": args.confidence, "line_count": len(lines),
+            "ocr_preprocess": args.ocr_preprocess, "mask_mode": args.mask_mode,
             "skipped_word_count": len(skipped), "skipped_words": skipped,
             "lines": lines, "mask": stats,
             "warning": "OCR is fallible: review EVERY transcription, text position, color, and inpainted region. Original input is unchanged.",
@@ -187,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Detected {len(lines)} text lines; skipped {len(skipped)} low-confidence words")
         print(f"Labels: {labels}\nReport: {report}")
         if not args.no_inpaint:
-            print(f"Cleaned image: {clean}\nMask: {stats['mask_path']}")
+            print(f"Cleaned image: {clean}\nMask: {stats['mask_path']}\nReview overlay: {stats['review_path']}")
         return 0
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"OCR preparation failed: {exc}", file=sys.stderr)
