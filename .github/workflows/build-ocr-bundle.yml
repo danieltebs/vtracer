@@ -31,7 +31,7 @@ jobs:
           cp LICENSE dist/vtracer-ocr/LICENSE
           printf '%s\n' "$GITHUB_SHA" > dist/vtracer-ocr/BUILD_SHA
           chmod +x dist/vtracer-ocr/vtracer
-          sha256sum dist/vtracer-ocr/vtracer > dist/vtracer-ocr/SHA256SUMS
+          (cd dist/vtracer-ocr && sha256sum vtracer > SHA256SUMS)
       - name: Upload portable binary for future offline sessions
         uses: actions/upload-artifact@v4
         with:
