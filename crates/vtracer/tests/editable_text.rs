@@ -45,3 +45,20 @@ fn empty_overlay_is_byte_for_byte_identical() {
     let img = sample();
     assert_eq!(pipeline.to_svg(&img).unwrap(), pipeline.to_svg_with_text(&img, &[]).unwrap());
 }
+
+
+#[test]
+fn multiple_labels_keep_their_order_and_are_editable() {
+    let pipeline = Config::default().build().unwrap();
+    let first = EditableText::new("Erste Zeile", 8.0, 12.0);
+    let second = EditableText::new("Zweite Zeile", 9.0, 32.0);
+    let svg = pipeline
+        .to_svg_with_text(&sample(), &[first, second])
+        .unwrap();
+    let first_pos = svg.find("Erste Zeile").unwrap();
+    let second_pos = svg.find("Zweite Zeile").unwrap();
+    assert!(first_pos < second_pos);
+    assert_eq!(svg.matches("<text ").count(), 2);
+    assert!(!svg.contains("<image"));
+    usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
+}
