@@ -82,6 +82,7 @@ pub mod colorfit;
 pub mod compose;
 pub mod config;
 pub mod error;
+pub mod editable_text;
 pub mod fitter;
 pub mod frontend;
 pub mod ir;
@@ -95,6 +96,7 @@ pub mod svg;
 
 pub use config::{Clustering, Config, FitMode, Hierarchical, Preset, SegmentKey};
 pub use error::Error;
+pub use editable_text::{EditableText, append_editable_text};
 pub use frontend::Threshold;
 pub use ir::{Segmentation, VectorDoc};
 pub use pipeline::Pipeline;
