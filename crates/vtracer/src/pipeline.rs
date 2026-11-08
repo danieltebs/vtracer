@@ -5,6 +5,7 @@ use visioncortex::ColorImage;
 use crate::colorfit::ColorFitter;
 use crate::compose::Compositing;
 use crate::error::Error;
+use crate::editable_text::{EditableText, append_editable_text};
 use crate::frontend::Frontend;
 use crate::ir::{Segmentation, VectorDoc};
 use crate::optimize::OptimizerPass;
@@ -128,5 +129,16 @@ impl Pipeline {
     /// Run the pipeline and serialize the result to an SVG string.
     pub fn to_svg(&self, img: &ColorImage) -> Result<String, Error> {
         Ok(self.writer.write(&self.run(img)?))
+    }
+
+    /// Trace an image and append real editable SVG <text> objects on top of
+    /// the vector paths. The caller must first remove raster text from the
+    /// input image, if any. When labels is empty this is identical to to_svg.
+    pub fn to_svg_with_text(
+        &self,
+        img: &ColorImage,
+        labels: &[EditableText],
+    ) -> Result<String, Error> {
+        append_editable_text(&self.to_svg(img)?, labels)
     }
 }
